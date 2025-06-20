@@ -1,0 +1,6 @@
+*__pycache__*
+*.env*
+*error.log*
+!.env.example
+*.png
+user_ids.txt

@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  line-reply-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: line-reply
+    volumes:
+      - ..:/app
+    working_dir: /app
+    command: ["python", "app.py"]
+    ports:
+      - "5002:5001"
+    networks:
+      - shared_net
+networks:
+  shared_net:
+    external: true
