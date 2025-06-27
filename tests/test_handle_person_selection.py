@@ -76,5 +76,5 @@ def test_handle_person_selection完成選擇時啟動上傳(fake_state, user_sta
 
     # 檢查上傳狀態
     assert fake_state["is_uploading"] is False
-    assert fake_state["step"] == "done"
+    assert fake_state["step"] == "uploading"
     assert user_states[user_id] == fake_state

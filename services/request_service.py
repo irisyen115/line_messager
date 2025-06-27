@@ -10,6 +10,7 @@ logging.basicConfig(filename="error.log", level=logging.ERROR, format="%(asctime
 line_bot_api = LineBotApi(Config.LINE_CHANNEL_ACCESS_TOKEN)
 
 def do_upload(person_id, album_name, num_photos, user_id, session, session_data, user_states, token):
+    success = False
     try:
         payload = {
             "personID": person_id,
@@ -20,43 +21,93 @@ def do_upload(person_id, album_name, num_photos, user_id, session, session_data,
         }
 
         for _ in range(5):
-            response = session.post(f"{Config.SERVER_URL}/api/upload/sync_photos", params = {"token":token}, json=payload)
+            response = session.post(f"{Config.SERVER_URL}/api/upload/sync_photos", params={"token": token}, json=payload)
+            response2 = session.get(f"{Config.SERVER_URL}/api/upload/upload_records", params={"personID": person_id}, verify=False)
 
+            # 檢查 sync_photos 回應
             if response.status_code != 200:
                 logging.error(f"❌ sync_photos 回傳非 200：{response.status_code}, {response.text}")
                 line_bot_api.push_message(user_id, TextSendMessage(text=f"❌ 同步失敗，請稍後再試。錯誤碼: {response.status_code}"))
                 break
 
-            if response.status_code == 200:
+            # 嘗試解析 JSON
+            try:
                 data = response.json()
-                line_bot_api.push_message(user_id, TextSendMessage(text=f"📄 同步報告：{data.get('message')}"))
+            except ValueError:
+                logging.error("❌ sync_photos 回傳內容不是有效的 JSON")
+                logging.error(f"回傳內容：{response.text}")
+                line_bot_api.push_message(user_id, TextSendMessage(text=f"❌ 同步失敗，伺服器未回傳有效內容。"))
+                break
 
-            response2 = session.get(f"{Config.SERVER_URL}/api/upload/upload_records", params={"personID": person_id}, verify=False)
-
+            # 檢查 upload_records 成功與否
             if response2.status_code != 200:
                 logging.error(f"❌ upload_records 失敗！Status: {response2.status_code}, Response: {response2.text}")
                 break
+
+            success = True
+            line_bot_api.push_message(user_id, TextSendMessage(text=f"📄 同步報告：{data.get('message')}"))
             break
 
-        user_states.pop(user_id, None)
-        session_data["last_action"] = None
-        session_path = f"sessions/{user_id}.json"
-        with open(session_path, "w") as f:
-            json.dump(session_data, f)
-        logging.error(f"✅ User {user_id} has completed the upload process.")
-
-    except requests.exceptions.RequestException as e:
-        logging.error(f"❌ 請求錯誤: {e}")
-    except json.JSONDecodeError as e:
-        logging.error(f"❌ JSON 解碼失敗: {e}")
     except Exception as e:
         logging.error(f"❌ 其他錯誤: {e}")
+    finally:
+        if success:
+            logging.error(f"✅ 狀態已成功清除")
+        else:
+            logging.warning(f"⚠️ 上傳失敗仍強制清除狀態")
+
+        user_states[user_id] = {
+            "step": None,
+            "faces": [],
+            "faces_loading": False,
+            "selected_person_ids": [],
+            "is_uploading": False,
+        }
+        session_data["last_action"] = None
+        with open(f"sessions/{user_id}.json", "w") as f:
+            json.dump(session_data, f)
+        logging.error(f"🧹 強制清除狀態（無論成功或失敗）")
 
 def notify_user(user_id, message):
     try:
         line_bot_api.push_message(user_id, TextSendMessage(text=message))
     except Exception as e:
         logging.error(f"推送訊息給 {user_id} 時失敗: {e}")
+
+def request_interval_time_sync(session, user_id, person_id, token, start_time, end_time):
+    try:
+        payload = {
+            "personID": person_id,
+            "start_time": start_time,
+            "end_time": end_time
+        }
+        url = f"{Config.SERVER_URL}/api/upload/sync_latest_photosync_interval_time_photos"
+        response = session.post(url, params={"token": token}, json=payload)
+        if response.status_code != 200:
+            logging.error(f"request_sync API failed: {response.status_code}, url={url}, body={response.text}")
+            line_bot_api.push_message(user_id, TextSendMessage(
+                text="⚠️ 同步照片時發生錯誤，請稍後再試。"
+            ))
+    except Exception as e:
+        logging.error(f"未知的同步錯誤: {e}")
+
+def request_sync(session, user_id, person_id, token, user_states):
+    try:
+        url = f"{Config.SERVER_URL}/api/upload/sync_latest_photo/{person_id}"
+        response = session.get(url, params={"token": token})
+        if response.status_code != 200:
+            logging.error(f"request_sync API failed: {response.status_code}, url={url}, body={response.text}")
+            line_bot_api.push_message(user_id, TextSendMessage(
+                text="⚠️ 同步照片時發生錯誤，請稍後再試。"
+            ))
+    except Exception as e:
+        logging.error(f"未知的同步錯誤: {e}")
+    finally:
+        user_states[user_id] = {
+            "step": None,
+            "faces": [],
+            "selected_person_ids": [],
+        }
 
 def get_faces(session, user_id, user_states):
     try:
@@ -66,12 +117,12 @@ def get_faces(session, user_id, user_states):
         if response.status_code == 200:
             faces = response.json()
 
-            # 寫回 user_states
             state = user_states.setdefault(user_id, {})
             state["faces"] = faces
             state["faces_loading"] = False
         else:
-            logging.error(f"取得人物列表失敗，狀態碼：{response.status_code}")
+            logging.error(f"取得人物列表失敗，狀態碼：{response.status_code}，內容：{response.text}")
+            notify_user(user_id, f"❌ 取得人物列表失敗，狀態碼：{response.status_code}。")
             user_states.setdefault(user_id, {})["faces_loading"] = False
     except Exception as e:
         logging.error(f"取得人物列表時錯誤: {e}")
@@ -79,8 +130,26 @@ def get_faces(session, user_id, user_states):
         user_states.setdefault(user_id, {})["faces_loading"] = False
 
 def get_album_list(token, user_id):
-    requests.post(
-        f"{Config.SERVER_URL}/api/upload/list_albums",
-        params={"token": token},
-        json={"user_id": user_id}
-    )
+    try:
+        response = requests.post(
+            f"{Config.SERVER_URL}/api/upload/list_albums",
+            params={"token": token},
+            timeout=10
+        )
+
+        if response.status_code != 200:
+            logging.error(f"list_albums API failed: {response.status_code}, {response.text}")
+            line_bot_api.push_message(user_id, TextSendMessage(
+                text="⚠️ 取得相簿時發生錯誤，請稍後再試。"
+            ))
+            return
+
+        # 正常處理結果
+        albums = response.json()
+        # 可視需要推播訊息或更新狀態
+
+    except requests.RequestException as e:
+        logging.error(f"Failed to connect to album API: {e}")
+        line_bot_api.push_message(user_id, TextSendMessage(
+            text="⚠️ 無法連線至伺服器，請重新登入，稍後再試。"
+        ))

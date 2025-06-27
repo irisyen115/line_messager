@@ -41,41 +41,44 @@ def download_font(font_dir="fonts"):
     return None
 
 # 使用範例
-def generate_rich_menu_background(output_path="with_text.png"):
+def generate_rich_menu_background(output_path="with_text.png", max_width_ratio=0.9):
     font_path = download_font()
     img_width, img_height = 2500, 843
     img = Image.new('RGB', (img_width, img_height), color=(0, 0, 0))  # 黑底
     draw = ImageDraw.Draw(img)
 
-    font_size = 150
-    font = ImageFont.truetype(font_path, font_size)
+    left_color = (0, 50, 0)
+    middle_color = (50, 0, 50)
+    right_color = (0, 0, 0)
+    third_width = img_width // 3
+    draw.rectangle([0, 0, third_width, img_height], fill=left_color)
+    draw.rectangle([third_width, 0, 2 * third_width, img_height], fill=middle_color)
+    draw.rectangle([2 * third_width, 0, img_width, img_height], fill=right_color)
 
-    left_color = (0, 50, 0)        # 深綠色
-    right_color = (0, 0, 0)          # 黑色
-    draw.rectangle([0, 0, img_width // 2, img_height], fill=left_color)
-    draw.rectangle([img_width // 2, 0, img_width, img_height], fill=right_color)
+    # 分隔線
+    draw.line([(third_width, 0), (third_width, img_height)], fill=(255, 255, 255), width=5)
+    draw.line([(2 * third_width, 0), (2 * third_width, img_height)], fill=(255, 255, 255), width=5)
 
+    # 文字內容
+    texts = ["我要上傳照片", "強制同步新照片", "使用自訂參數"]
 
-    # 畫分隔線（中間線）
-    line_x = img_width // 2
-    draw.line([(line_x, 0), (line_x, img_height)], fill=(255, 255, 255), width=5)
+    for i, text in enumerate(texts):
+        font_size = 150
+        max_text_width = int(third_width * max_width_ratio)
 
-    # 畫左邊文字（白色）
-    left_text = "我要上傳照片"
-    left_text_size = draw.textbbox((0, 0), left_text, font=font)
-    left_text_width = left_text_size[2] - left_text_size[0]
-    left_text_height = left_text_size[3] - left_text_size[1]
-    left_x = (img_width // 2 - left_text_width) // 2
-    left_y = (img_height - left_text_height) // 2
-    draw.text((left_x, left_y), left_text, font=font, fill=(255, 255, 255))
-    # 畫右邊文字（白色）
-    right_text = "使用自訂參數"
-    right_text_size = draw.textbbox((0, 0), right_text, font=font)
-    right_text_width = right_text_size[2] - right_text_size[0]
-    right_text_height = right_text_size[3] - right_text_size[1]
-    right_x = img_width // 2 + (img_width // 2 - right_text_width) // 2
-    right_y = (img_height - right_text_height) // 2
-    draw.text((right_x, right_y), right_text, font=font, fill=(255, 255, 255))
+        # 嘗試從最大字體慢慢縮小
+        while font_size > 20:
+            font = ImageFont.truetype(font_path, font_size)
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            if text_width <= max_text_width:
+                break
+            font_size -= 2
+
+        x = i * third_width + (third_width - text_width) // 2
+        y = (img_height - text_height) // 2
+        draw.text((x, y), text, font=font, fill=(255, 255, 255))
 
     img.save(output_path)
     print(f"✅ 圖片已儲存：{output_path}")
@@ -113,11 +116,15 @@ def create_rich_menu():
             chat_bar_text="點我展開選單",
             areas=[
                 RichMenuArea(
-                    bounds=RichMenuBounds(x=0, y=0, width=1250, height=843),
+                    bounds=RichMenuBounds(x=0, y=0, width=833, height=843),
                     action=MessageAction(label="左邊", text="我要上傳照片")
                 ),
                 RichMenuArea(
-                    bounds=RichMenuBounds(x=1250, y=0, width=1250, height=843),
+                    bounds=RichMenuBounds(x=833, y=0, width=833, height=843),
+                    action=MessageAction(label="中間", text="強制同步新照片")
+                ),
+                RichMenuArea(
+                    bounds=RichMenuBounds(x=1666, y=0, width=834, height=843),
                     action=MessageAction(label="右邊", text="使用自訂參數")
                 )
             ]

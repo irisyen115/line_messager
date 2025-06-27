@@ -1,7 +1,7 @@
 import threading
 from linebot.models import FlexSendMessage
 from utils.flex_message_builder import build_face_bubbles, get_album_name_input_options
-from services.request_service import do_upload, get_album_list, get_faces
+from services.request_service import do_upload, get_album_list, get_faces, request_sync, request_interval_time_sync
 from config.config import Config
 import logging
 import requests
@@ -17,8 +17,11 @@ logging.basicConfig(filename="error.log", level=logging.ERROR, format="%(asctime
 line_bot_api = LineBotApi(Config.LINE_CHANNEL_ACCESS_TOKEN)
 
 VALID_TRANSITIONS = {
-    None: ["ask_person", "start"],
-    "ask_person": ["ask_person_again", "ask_google_album_name", "uploading"],
+    None: ["ask_person", "start", "ask_sync"],
+    "ask_sync": ["ask_sync_person"],
+    "ask_sync_person": ["sync_photo"],
+    "sync_photo":[],
+    "ask_person": ["ask_google_album_name", "uploading"],
     "ask_google_album_name": ["ask_count"],
     "ask_count": ["uploading"],
     "uploading": [],
@@ -28,28 +31,148 @@ def is_valid_transition(current_step, next_step):
     return next_step in VALID_TRANSITIONS.get(current_step, [])
 
 def set_user_step(user_id, state, next_step):
+    if state.get("step") == next_step:
+        return True
     if not is_valid_transition(state.get("step"), next_step):
         raise ValueError(f"非法狀態轉移：{state.get('step')} ➜ {next_step}")
+    history = state.setdefault("history", [])
+    if state.get("step"):
+        history.append(state["step"])
     state["step"] = next_step
     user_states[user_id] = state
+
+def go_back_step(user_id):
+    state = user_states.get(user_id)
+    history = state.get("history", [])
+
+    if not history:
+        user_states[user_id] = {
+            "step": None,
+            "faces": [],
+            "faces_loading": False,
+            "selected_person_id": [],
+            "is_uploading": False,
+        }
+        return ["📸 已返回起始狀態，請於圖文選單選擇「我要上傳照片」來開始上傳流程"]
+
+    previous_step = history.pop()
+    state["step"] = previous_step
+    user_states[user_id] = state
+
+    if previous_step == "ask_person":
+        state["selected_person_id"] = []
+
+        return [TextSendMessage(
+            text="📸 已返回人物選擇，請選擇下一步動作：",
+            quick_reply=QuickReply(items=[
+                QuickReplyButton(action=MessageAction(label="我要上傳照片", text="我要上傳照片")),
+                QuickReplyButton(action=MessageAction(label="不需要上傳", text="不需要上傳")),
+                QuickReplyButton(action=MessageAction(label="使用自訂參數", text="使用自訂參數")),
+            ])
+        )]
+
+    elif previous_step == "ask_google_album_name":
+        return add_back_button_to_message(get_album_name_input_options())
+
+    elif previous_step == "ask_count":
+        return add_back_button_to_message(
+            handle_album_name_input(user_id, state.get("album_name", ""), state)
+        )
+
+    return [TextSendMessage(text=f"↩️ 已退回到步驟：{previous_step}")]
+
+
+def add_back_button_to_message(msg):
+    back_button = {
+        "type": "action",
+        "action": {
+            "type": "message",
+            "label": "↩️ 返回上一步",
+            "text": "返回上一步"
+        }
+    }
+
+    def add_quick_reply_to_dict(message_dict):
+        if "quickReply" not in message_dict:
+            message_dict["quickReply"] = {"items": [back_button]}
+        else:
+            message_dict["quickReply"]["items"].append(back_button)
+        return message_dict
+
+    if hasattr(msg, "as_json_dict"):
+        msg_dict = msg.as_json_dict()
+        return [msg_dict,
+                {
+                    "type": "text",
+                    "text": "↩️ 您可以點選下方按鈕返回上一步",
+                    "quickReply": {"items": [back_button]}
+                }]
+
+    if isinstance(msg, list):
+        result = []
+        has_text = False
+        for m in msg:
+            if hasattr(m, "as_json_dict"):
+                result.append(add_quick_reply_to_dict(m.as_json_dict()))
+                has_text = True
+            elif isinstance(m, dict):
+                result.append(add_quick_reply_to_dict(m))
+                has_text = True
+            elif isinstance(m, str):
+                result.append({
+                    "type": "text",
+                    "text": m,
+                    "quickReply": {"items": [back_button]}
+                })
+                has_text = True
+            else:
+                raise TypeError(f"Unsupported message type in list: {type(m)}")
+
+        if not has_text:
+            result.append({
+                "type": "text",
+                "text": "↩️ 您可以點選下方按鈕返回上一步",
+                "quickReply": {"items": [back_button]}
+            })
+        return result
+
+    if isinstance(msg, str):
+        return [{
+            "type": "text",
+            "text": msg,
+            "quickReply": {"items": [back_button]}
+        }]
+
+    if isinstance(msg, dict):
+        return [add_quick_reply_to_dict(msg)]
+
+    raise TypeError(f"Unsupported message type: {type(msg)}")
 
 user_states = {}
 
 def handle_message(user_id, message_text, session, session_data, token):
     try:
-        state = user_states.setdefault(user_id, {
+        default_state = {
             "step": None,
             "faces": [],
             "faces_loading": False,
-            "selected_person_ids": [],
+            "selected_person_id": [],
             "is_uploading": False,
-        })
+            "start_time": None,
+            "end_time":None,
+        }
+
+        state = user_states.setdefault(user_id, {})
+        for key, value in default_state.items():
+            state.setdefault(key, value)
+
         current_step = state.get("step")
         if current_step not in VALID_TRANSITIONS:
-            return "⚠️ 發生錯誤，請重新開始流程。"
+            logging.error(f"current step: {current_step}")
+            return add_back_button_to_message(TextSendMessage(text="⚠️ 發生錯誤，請重新開始流程。"))
 
-        if current_step:
-            logging.error(f"Current step: {state['step']}")
+        if message_text == "返回上一步":
+            return add_back_button_to_message(go_back_step(user_id))
 
         if message_text == "使用自訂參數":
             set_user_step(user_id, state, "ask_person")
@@ -59,34 +182,45 @@ def handle_message(user_id, message_text, session, session_data, token):
             set_user_step(user_id, state, "ask_person")
             return handle_start_upload(user_id)
 
+        elif message_text == "強制同步新照片":
+            set_user_step(user_id, state, "ask_sync")
+            return request_person_id(user_id)
+
         if message_text == "列出我的相簿":
             return handle_list_albums(user_id, token)
 
         elif message_text == "手動輸入相簿名":
-            return "🔤 請輸入相簿名稱："
+            return add_back_button_to_message(TextSendMessage(text="🔤 請輸入相簿名稱："))
 
-        if current_step  == "ask_person":
-            return handle_person_selection(user_id, message_text, state, session, session_data, token)
+        if current_step == "ask_sync_person":
+            return send_request(message_text, user_id, token)
 
-        elif current_step  == "ask_google_album_name":
+        if current_step == "ask_person":
+            return add_back_button_to_message(
+                handle_person_selection(user_id, message_text, state, session, session_data, token)
+            )
+
+        if current_step == "ask_google_album_name":
             set_user_step(user_id, state, "ask_count")
-            return handle_album_name_input(user_id, message_text, state)
+            return add_back_button_to_message(handle_album_name_input(user_id, message_text, state))
 
-        elif current_step  == "ask_count":
+        if current_step == "ask_count":
             set_user_step(user_id, state, "uploading")
-            return handle_photo_count_input(user_id, message_text, state, session, session_data, token)
+            return add_back_button_to_message(handle_photo_count_input(
+                user_id, message_text, state, session, session_data, token
+            ))
 
-        return "請輸入「我要上傳照片」來開始相簿上傳流程。"
+        return add_back_button_to_message(TextSendMessage(
+            text="請輸入「我要上傳照片」來開始相簿上傳流程。"
+        ))
 
     except Exception as e:
         logging.error(e)
-        return "⚠️ 發生錯誤，請稍後再試。"
+        return add_back_button_to_message(TextSendMessage(
+            text="⚠️ 發生錯誤，請稍後再試。"
+        ))
 
-def handle_list_albums(user_id, token):
-    threading.Thread(target=get_album_list, args=(token, user_id)).start()
-    return "📂 正在列出所有相簿，請稍候..."
-
-def handle_custom_parameters(user_id):
+def select_person(user_id):
     state = user_states.get(user_id, {})
     faces = state.get("faces", [])
     faces_loading = state.get("faces_loading", False)
@@ -103,136 +237,181 @@ def handle_custom_parameters(user_id):
         else:
             return "⚠️ 人物列表仍在載入中，請稍候..."
 
-    carousel = {"type": "carousel", "contents": build_face_bubbles(faces)}
-    return FlexSendMessage(alt_text="請選擇人物上傳照片", contents=carousel)
+    flex_msg = build_face_bubbles(faces)
+    return flex_msg
+
+def request_person_id(user_id):
+    state = user_states.get(user_id, {})
+    get_faces(session, user_id, user_states)
+    set_user_step(user_id, state, "ask_sync_person")
+    return "請先選擇人物"
+
+def send_request(message_text, user_id, token):
+    state = user_states.get(user_id, {})
+    person_id = message_text.replace("SELECT_PERSON_", "")
+    set_user_step(user_id, state, "sync_photo")
+    threading.Thread(target=request_sync, args=(session, user_id, person_id, token, user_states)).start()
+    return "已發送同步請求"
+
+def get_sync_interval_time(user_id, token, start_time, end_time):
+    state = user_states.get(user_id, {})
+    person_id = state['selected_person_id'][0]
+    start_time = state['start_time']
+    end_time = state['end_time']
+    set_user_step(user_id, state, "sync_photo")
+    threading.Thread(target=request_interval_time_sync, args=(session, user_id, person_id, token, start_time, end_time)).start()
+    return "已發送同步請求"
+
+def handle_list_albums(user_id, token):
+    threading.Thread(target=get_album_list, args=(token, user_id)).start()
+    return "📂 正在列出所有相簿，請稍候..."
+
+def handle_custom_parameters(user_id):
+    try:
+        select_person(user_id)
+        flex_msg = select_person(user_id)
+
+        return add_back_button_to_message(flex_msg)
+    except Exception as e:
+            logging.error(f"handle_custom_parameters 未知的錯誤:{e}")
 
 def handle_start_upload(user_id):
-    state = user_states.setdefault(user_id, {})
-    faces = state.get("faces", [])
-    faces_loading = state.get("faces_loading", False)
+    try:
+        flex_msg = select_person(user_id)
 
-    if not faces:
-        if not faces_loading:
-            state.update({
-                "step": "ask_person",
-                "album_name": "",
-                "num_photos": 5,
-                "faces_loading": True
-            })
-            threading.Thread(target=get_faces, args=(session, user_id, user_states)).start()
-            user_states[user_id] = state
-            return "⚠️ 正在取得人物列表，完成後會通知您。"
-        else:
-            return "⚠️ 人物列表仍在載入中，請稍候..."
+        state = user_states.get(user_id, {})
+        state.update({
+            "step": "ask_person",
+            "album_name": "",
+            "num_photos": 5,
+            "faces_loading": True
+        })
 
-    flex_msg = build_face_bubbles(faces)
-    if isinstance(flex_msg.contents, CarouselContainer):
-        for i, bubble in enumerate(flex_msg.contents.contents):
-            if isinstance(bubble, BubbleContainer):
-                contents = bubble.body.contents
-                for j, content in enumerate(contents):
-                    if content is None:
-                        logging.error(f"Null element found in contents[{i}].body.contents[{j}]")
-            else:
-                logging.error(f"Unexpected bubble type at index {i}: {type(bubble)}")
-    else:
-        logging.error("flex_msg.contents is not a CarouselContainer")
-
-    return flex_msg
+        return add_back_button_to_message(flex_msg)
+    except Exception as e:
+        logging.error(f"handle_start_upload 未知的錯誤:{e}")
 
 def extract_person_id_from_text_or_action(message_text, state):
     if message_text.startswith("SELECT_PERSON_"):
         return message_text.replace("SELECT_PERSON_", "")
-    # 也可以對應名字找 personId
     for face in state.get("faces", []):
         if face["name"] == message_text:
             return face["ID"]
     return None
 
-def upload_sequence(state, user_id, session, session_data, user_states, token, do_upload):
-    persons = state["selected_person_ids"]
-    total_photos = state["num_photos"]
-    n = len(persons)
-    base_num = total_photos // n
-    remainder = total_photos % n
-
-    for i, person_id in enumerate(persons):
-        num_to_upload = base_num + (remainder if i == n - 1 else 0)
-
-        if num_to_upload > 0:
-            do_upload(person_id, state["album_name"], num_to_upload,
-                      user_id, session, session_data, user_states, token)
-
-    state["is_uploading"] = False
-    state["step"] = "done"
-    user_states[user_id] = state
-
-
 def handle_person_selection(user_id, message_text, state, session, session_data, token):
-    if message_text.startswith("SELECT_PERSON_"):
-        person_id = extract_person_id_from_text_or_action(message_text, state)
-        if not person_id or not person_id.isdigit():
-            return "❌ 請提供有效的人物 ID"
-        logging.error(f"selected_person_ids: {state['selected_person_ids']}")
-        if person_id not in state["selected_person_ids"]:
-            state["selected_person_ids"].append(person_id)
+    person_id = None
+    try:
+        if message_text.startswith("SELECT_PERSON_"):
+            person_id = extract_person_id_from_text_or_action(message_text, state)
+            if not person_id or not person_id.isdigit():
+                return {
+                    "type": "text",
+                    "text": "❌ 請提供有效的人物 ID"
+                }
+            if person_id not in state["selected_person_id"]:
+                state["selected_person_id"].append(person_id)
 
-        return f"✅ 已選擇 {len(state['selected_person_ids'])} 位人物，可繼續選擇或輸入『完成選擇』繼續下一步。"
+            selection_already = {
+                "type": "action",
+                "action": {
+                    "type": "message",
+                    "label": "✅ 完成選擇",
+                    "text": "完成選擇"
+                }
+            }
+            return {
+                "type": "text",
+                "text": f"✅ 已選擇 {len(state['selected_person_id'])} 位人物，可回到上一步重新選擇一人或輸入『完成選擇』繼續下一步。",
+                "quickReply": {
+                    "items": [selection_already]
+                }
+            }
 
-    elif message_text == "完成選擇":
-        if not state["selected_person_ids"]:
-            return "⚠️ 請至少選擇一位人物再進行下一步。"
+        elif message_text == "完成選擇":
+            if not state["selected_person_id"]:
+                return {
+                    "type": "text",
+                    "text": "⚠️ 請至少選擇一位人物再進行下一步。"
+                }
 
-        if "album_name" in state and "num_photos" in state:
-            if state.get("is_uploading"):
-                return "⚠️ 照片正在上傳中，請稍候完成後再試一次。"
+            if "album_name" in state and "num_photos" in state:
+                if state.get("is_uploading"):
+                    return {
+                        "type": "text",
+                        "text": "⚠️ 照片正在上傳中，請稍候完成後再試一次。"
+                    }
 
-            state["step"] = "uploading"
-            user_states[user_id] = state
+                state["step"] = "uploading"
+                user_states[user_id] = state
 
-            threading.Thread(
-                target=upload_sequence,
-                args=(state, user_id, session, session_data, user_states, token, do_upload)
-            ).start()
-            return f"✅ 收到資訊！正在上傳 {state['num_photos']} 張照片到相簿，請稍候..."
+                for person_id in state["selected_person_id"]:
+                    upload_photos(person_id, state, user_id, session, session_data, token)
+
+                return {
+                    "type": "text",
+                    "text": "📤 照片上傳中，請稍候..."
+                }
+            else:
+                set_user_step(user_id, state, "ask_google_album_name")
+                return get_album_name_input_options()
+
         else:
-            set_user_step(user_id, state, "ask_google_album_name")
-            return get_album_name_input_options()
-    else:
-        return "請點選選單上的「選擇」按鈕選擇人物，或輸入『完成選擇』繼續。"
+            return {
+                "type": "text",
+                "text": "請點選選單上的「選擇」按鈕選擇人物，或輸入『完成選擇』繼續。"
+            }
+    except Exception as e:
+        import traceback
+        logging.error(f"handle_person_selection 未知的錯誤:\n{traceback.format_exc()}")
+        return {
+            "type": "text",
+            "text": "❌ 發生錯誤，請稍後再試一次。"
+        }
 
 def handle_photo_count_input(user_id, message_text, state, session, session_data, token):
-    if not message_text.isdigit():
-        return "❌ 請輸入正確的數字"
-    num_photos = int(message_text)
+    try:
+        if not message_text.isdigit():
+            return "❌ 請輸入正確的數字"
+        num_photos = int(message_text)
+        person_id = state["selected_person_id"][0]
 
-    if state["is_uploading"]:
-        return "⚠️ 照片正在上傳中，請稍候完成後再試一次。"
+        if state["is_uploading"]:
+            return "⚠️ 照片正在上傳中，請稍候完成後再試一次。"
 
-    state["num_photos"] = num_photos
-    state["is_uploading"] = True
-    user_states[user_id] = state
+        state["num_photos"] = num_photos
+        state["is_uploading"] = True
+        user_states[user_id] = state
 
+        return upload_photos(person_id, state, user_id, session, session_data, token)
+    except Exception as e:
+        logging.error(f"handle_photo_count_input 未知的錯誤:{e}")
+        return "⚠️ 發生錯誤，請稍後再試。"
+
+def upload_photos(person_id, state, user_id, session, session_data, token):
     threading.Thread(
-        target=upload_sequence,
-        args=(state, user_id, session, session_data, user_states, token, do_upload)
+        target=do_upload,
+        args=(person_id, state["album_name"], state['num_photos'],
+                user_id, session, session_data, user_states, token)
     ).start()
 
-    return f"✅ 正在為 {len(state['selected_person_ids'])} 位人物，上傳 {num_photos} 張照片到相簿中，請稍候..."
+    return f"✅ 正在上傳 {state['num_photos']} 張照片到相簿中，請稍候..."
 
 def handle_album_name_input(user_id, message_text, state):
-    state["album_name"] = message_text
-    user_states[user_id] = state
-    message = TextSendMessage(
-        text="請選擇要上傳的照片張數：",
-        quick_reply=QuickReply(items=[
-            QuickReplyButton(action=MessageAction(label="5 張", text="5")),
-            QuickReplyButton(action=MessageAction(label="50 張", text="50")),
-            QuickReplyButton(action=MessageAction(label="100 張", text="100")),
-            QuickReplyButton(action=MessageAction(label="200 張", text="200")),
-        ])
-    )
     try:
-        return [message.as_json_dict()]
-    except requests.RequestException as e:
-        logging.error(f"回覆使用者時發生錯誤: {e}")
+        state["album_name"] = message_text
+        user_states[user_id] = state
+        return {
+            "type": "text",
+            "text": "請選擇要上傳的照片張數：",
+            "quickReply": {
+                "items": [
+                    {"type":"action","action":{"type":"message","label":"5 張","text":"5"}},
+                    {"type":"action","action":{"type":"message","label":"50 張","text":"50"}},
+                    {"type":"action","action":{"type":"message","label":"100 張","text":"100"}},
+                    {"type":"action","action":{"type":"message","label":"200 張","text":"200"}}
+                ]
+            }
+        }
+    except Exception as e:
+        logging.error(f"handle_album_name_input 未知的錯誤:{e}")
