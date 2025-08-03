@@ -1,6 +1,6 @@
 import threading
 from linebot.models import FlexSendMessage
-from utils.flex_message_builder import build_face_bubbles, get_album_name_input_options
+from utils.flex_message_builder import build_face_bubbles, get_album_name_input_options, get_whether_interval_input_options
 from services.request_service import do_upload, get_album_list, get_faces, request_sync, request_interval_time_sync
 from config.config import Config
 import logging
@@ -8,6 +8,7 @@ import requests
 from dotenv import load_dotenv
 from linebot import LineBotApi
 from linebot.models import TextSendMessage, QuickReply, QuickReplyButton, MessageAction, BubbleContainer, CarouselContainer
+from datetime import datetime
 
 load_dotenv()
 
@@ -21,8 +22,11 @@ VALID_TRANSITIONS = {
     "ask_sync": ["ask_sync_person"],
     "ask_sync_person": ["sync_photo"],
     "sync_photo":[],
-    "ask_person": ["ask_google_album_name", "uploading"],
+    "ask_person": ["ask_whether_interval", "ask_google_album_name", "uploading"],
     "ask_google_album_name": ["ask_count"],
+    "ask_whether_interval":["ask_photo_start_time", "ask_google_album_name"],
+    "ask_photo_start_time": ["ask_photo_end_time"],
+    "ask_photo_end_time":["ask_google_album_name"],
     "ask_count": ["uploading"],
     "uploading": [],
 }
@@ -30,10 +34,10 @@ VALID_TRANSITIONS = {
 def is_valid_transition(current_step, next_step):
     return next_step in VALID_TRANSITIONS.get(current_step, [])
 
-def set_user_step(user_id, state, next_step):
+def set_user_step(user_id, state, next_step, skip_validation=False):
     if state.get("step") == next_step:
         return True
-    if not is_valid_transition(state.get("step"), next_step):
+    if not skip_validation and not is_valid_transition(state.get("step"), next_step):
         raise ValueError(f"非法狀態轉移：{state.get('step')} ➜ {next_step}")
     history = state.setdefault("history", [])
     if state.get("step"):
@@ -61,7 +65,6 @@ def go_back_step(user_id):
 
     if previous_step == "ask_person":
         state["selected_person_id"] = []
-
         return [TextSendMessage(
             text="📸 已返回人物選擇，請選擇下一步動作：",
             quick_reply=QuickReply(items=[
@@ -70,6 +73,15 @@ def go_back_step(user_id):
                 QuickReplyButton(action=MessageAction(label="使用自訂參數", text="使用自訂參數")),
             ])
         )]
+
+    elif previous_step == "ask_whether_interval":
+        return add_back_button_to_message(get_whether_interval_input_options())
+
+    elif previous_step == "ask_photo_start_time":
+        return add_back_button_to_message("請輸入同步起始時間，例如 2025年6月1日")
+
+    elif previous_step == "ask_photo_end_time":
+        return add_back_button_to_message("請輸入同步截止時間，例如 2025年7月1日")
 
     elif previous_step == "ask_google_album_name":
         return add_back_button_to_message(get_album_name_input_options())
@@ -167,19 +179,19 @@ def handle_message(user_id, message_text, session, session_data, token):
             state.setdefault(key, value)
 
         current_step = state.get("step")
+        logging.error(f"current step: {current_step}")
         if current_step not in VALID_TRANSITIONS:
-            logging.error(f"current step: {current_step}")
             return add_back_button_to_message(TextSendMessage(text="⚠️ 發生錯誤，請重新開始流程。"))
 
         if message_text == "返回上一步":
             return add_back_button_to_message(go_back_step(user_id))
 
         if message_text == "使用自訂參數":
-            set_user_step(user_id, state, "ask_person")
+            set_user_step(user_id, state, "ask_person", skip_validation=True)
             return handle_custom_parameters(user_id)
 
         elif message_text == "我要上傳照片":
-            set_user_step(user_id, state, "ask_person")
+            set_user_step(user_id, state, "ask_person", skip_validation=True)
             return handle_start_upload(user_id)
 
         elif message_text == "強制同步新照片":
@@ -192,6 +204,19 @@ def handle_message(user_id, message_text, session, session_data, token):
         elif message_text == "手動輸入相簿名":
             return add_back_button_to_message(TextSendMessage(text="🔤 請輸入相簿名稱："))
 
+        if message_text == "自訂同步相片間隔時間":
+            set_user_step(user_id, state, "ask_photo_start_time")
+            return "請輸入同步照片**開始時間**，例如 2025年1月1日"
+
+        elif message_text == "預設隨機時間":
+            set_user_step(user_id, state, "ask_google_album_name")
+
+        if current_step == "ask_photo_start_time":
+            return save_start_time_and_ask_end_time(message_text, user_id)
+
+        if current_step == "ask_photo_end_time":
+            return save_end_time(message_text, user_id, token)
+
         if current_step == "ask_sync_person":
             return send_request(message_text, user_id, token)
 
@@ -199,6 +224,10 @@ def handle_message(user_id, message_text, session, session_data, token):
             return add_back_button_to_message(
                 handle_person_selection(user_id, message_text, state, session, session_data, token)
             )
+
+        if current_step == "ask_whether_interval":
+            set_user_step(user_id, state, "ask_google_album_name")
+            return add_back_button_to_message(get_album_name_input_options())
 
         if current_step == "ask_google_album_name":
             set_user_step(user_id, state, "ask_count")
@@ -258,7 +287,7 @@ def get_sync_interval_time(user_id, token, start_time, end_time):
     person_id = state['selected_person_id'][0]
     start_time = state['start_time']
     end_time = state['end_time']
-    set_user_step(user_id, state, "sync_photo")
+    set_user_step(user_id, state, "ask_google_album_name")
     threading.Thread(target=request_interval_time_sync, args=(session, user_id, person_id, token, start_time, end_time)).start()
     return "已發送同步請求"
 
@@ -353,8 +382,8 @@ def handle_person_selection(user_id, message_text, state, session, session_data,
                     "text": "📤 照片上傳中，請稍候..."
                 }
             else:
-                set_user_step(user_id, state, "ask_google_album_name")
-                return get_album_name_input_options()
+                set_user_step(user_id, state, "ask_whether_interval")
+                return get_whether_interval_input_options()
 
         else:
             return {
@@ -387,6 +416,46 @@ def handle_photo_count_input(user_id, message_text, state, session, session_data
     except Exception as e:
         logging.error(f"handle_photo_count_input 未知的錯誤:{e}")
         return "⚠️ 發生錯誤，請稍後再試。"
+
+
+def parse_date_string(date_str):
+    try:
+        clean = date_str.replace("年", "-").replace("月", "-").replace("日", "")
+        dt = datetime.strptime(clean, "%Y-%m-%d")
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
+        raise ValueError("日期格式錯誤，請用 '2025年6月1日' 這種格式輸入")
+
+def save_start_time_and_ask_end_time(message_text, user_id):
+    try:
+        state = user_states.get(user_id, {})
+        date_str = parse_date_string(message_text)
+        state["start_time"] = date_str
+        user_states[user_id] = state
+        set_user_step(user_id, state, "ask_photo_end_time")
+        return "請輸入同步照片**截止時間**，例如 2025年7月1日"
+    except ValueError as ve:
+        return str(ve)
+    except Exception as e:
+        logging.error(f"未知錯誤 save_start_time: {e}")
+        return "發生錯誤，請重新輸入起始時間"
+
+def save_end_time(message_text, user_id, token):
+    try:
+        state = user_states.get(user_id, {})
+        date_str = parse_date_string(message_text)
+        state["end_time"] = date_str
+        user_states[user_id] = state
+        logging.info(f"{user_id} 設定結束時間為 {date_str}")
+
+        get_sync_interval_time(user_id, token, state["start_time"], state["end_time"])
+        set_user_step(user_id, state, "ask_google_album_name")
+        return get_album_name_input_options()
+    except ValueError as ve:
+        return str(ve)
+    except Exception as e:
+        logging.error(f"未知錯誤 save_end_time: {e}")
+        return "發生錯誤，請重新輸入截止時間"
 
 def upload_photos(person_id, state, user_id, session, session_data, token):
     threading.Thread(

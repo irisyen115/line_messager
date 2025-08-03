@@ -14,14 +14,13 @@ def do_upload(person_id, album_name, num_photos, user_id, session, session_data,
     try:
         payload = {
             "personID": person_id,
-            "albumID": None,
             "albumName": album_name,
             "numPhotos": num_photos,
             "token": token
         }
 
         for _ in range(5):
-            response = session.post(f"{Config.SERVER_URL}/api/upload/sync_photos", params={"token": token}, json=payload)
+            response = session.post(f"{Config.SERVER_URL}/api/upload/upload_photos", params={"token": token}, json=payload)
             response2 = session.get(f"{Config.SERVER_URL}/api/upload/upload_records", params={"personID": person_id}, verify=False)
 
             # 檢查 sync_photos 回應
@@ -81,7 +80,7 @@ def request_interval_time_sync(session, user_id, person_id, token, start_time, e
             "start_time": start_time,
             "end_time": end_time
         }
-        url = f"{Config.SERVER_URL}/api/upload/sync_latest_photosync_interval_time_photos"
+        url = f"{Config.SERVER_URL}/api/upload/sync_interval_time_photos"
         response = session.post(url, params={"token": token}, json=payload)
         if response.status_code != 200:
             logging.error(f"request_sync API failed: {response.status_code}, url={url}, body={response.text}")

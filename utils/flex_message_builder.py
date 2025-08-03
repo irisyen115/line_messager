@@ -136,6 +136,54 @@ def get_album_name_input_options():
         }
     )
 
+def get_whether_interval_input_options():
+    return FlexSendMessage(
+        alt_text="請選擇是否指定照片時間",
+        contents={
+            "type": "bubble",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "md",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "是否選擇上傳時間間格",
+                        "wrap": True,
+                        "weight": "bold",
+                        "size": "md"
+                    }
+                ]
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": [
+                    {
+                        "type": "button",
+                        "style": "primary",
+                        "color": "#1DB446",
+                        "action": {
+                            "type": "message",
+                            "label": "🔘 選擇時間間隔",
+                            "text": "自訂同步相片間隔時間"
+                        }
+                    },
+                    {
+                        "type": "button",
+                        "style": "secondary",
+                        "action": {
+                            "type": "message",
+                            "label": "📝 預設隨機時間",
+                            "text": "預設隨機時間"
+                        }
+                    }
+                ]
+            }
+        }
+    )
+
 def safe_url(url):
     if url and isinstance(url, str) and url.startswith("http"):
         return url

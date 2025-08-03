@@ -6,6 +6,7 @@ from controllers.webhook_controller import webhook_bp
 from controllers.notify_controller import notify_bp
 from controllers.album_controller import album_bp
 from controllers.face_controller import face_bp
+from controllers.alert_controller import alert_bp
 from utils.get_menu_items import create_rich_menu
 
 load_dotenv()
@@ -17,7 +18,7 @@ app.register_blueprint(webhook_bp)
 app.register_blueprint(notify_bp)
 app.register_blueprint(album_bp)
 app.register_blueprint(face_bp)
-
+app.register_blueprint(alert_bp)
 
 if __name__ == "__main__":
     create_rich_menu()

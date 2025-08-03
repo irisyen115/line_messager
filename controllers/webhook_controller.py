@@ -10,9 +10,7 @@ logging.basicConfig(filename="error.log", level=logging.ERROR, format="%(asctime
 @webhook_bp.route("/webhook", methods=["GET", "POST"])
 def webhook():
     try:
-        logging.error("Received webhook request")
         data = request.get_json(force=True)
-        logging.error("收到模擬資料：%s", data)
         if not data:
             return jsonify({"error": "Invalid JSON"}), 400
         uid = data["events"][0]["source"]["userId"]
