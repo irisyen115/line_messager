@@ -166,8 +166,8 @@ def get_whether_interval_input_options():
                         "color": "#1DB446",
                         "action": {
                             "type": "message",
-                            "label": "🔘 選擇時間間隔",
-                            "text": "自訂同步相片間隔時間"
+                            "label": "🔘 預設隨機時間",
+                            "text": "預設隨機時間"
                         }
                     },
                     {
@@ -175,8 +175,8 @@ def get_whether_interval_input_options():
                         "style": "secondary",
                         "action": {
                             "type": "message",
-                            "label": "📝 預設隨機時間",
-                            "text": "預設隨機時間"
+                            "label": "📝 選擇時間間隔",
+                            "text": "自訂同步相片間隔時間"
                         }
                     }
                 ]
