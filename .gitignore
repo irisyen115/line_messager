@@ -4,3 +4,7 @@
 !.env.example
 *.png
 user_ids.txt
+# runtime files (contain LINE user IDs)
+app.log
+*.log
+sessions/
