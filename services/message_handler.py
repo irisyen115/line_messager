@@ -461,7 +461,7 @@ def upload_photos(person_id, state, user_id, session, session_data, token):
     threading.Thread(
         target=do_upload,
         args=(person_id, state["album_name"], state['num_photos'],
-                user_id, session, session_data, user_states, token)
+                user_id, session, session_data, user_states, token, state.get("start_time"), state.get("end_time"))
     ).start()
 
     return f"✅ 正在上傳 {state['num_photos']} 張照片到相簿中，請稍候..."

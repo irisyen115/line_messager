@@ -9,21 +9,23 @@ import requests
 logging.basicConfig(filename="error.log", level=logging.ERROR, format="%(asctime)s - %(levelname)s - %(message)s")
 line_bot_api = LineBotApi(Config.LINE_CHANNEL_ACCESS_TOKEN)
 
-def do_upload(person_id, album_name, num_photos, user_id, session, session_data, user_states, token):
+def do_upload(person_id, album_name, num_photos, user_id, session, session_data, user_states, token, start_time=None, end_time=None):
     success = False
     try:
         payload = {
             "personID": person_id,
             "albumName": album_name,
             "numPhotos": num_photos,
-            "token": token
+            "token": token,
+            "start_time": start_time,
+            "end_time": end_time
         }
+        logging.error(f"開始上傳照片，payload: {payload}")
 
         for _ in range(5):
             response = session.post(f"{Config.SERVER_URL}/api/upload/upload_photos", params={"token": token}, json=payload)
             response2 = session.get(f"{Config.SERVER_URL}/api/upload/upload_records", params={"personID": person_id}, verify=False)
 
-            # 檢查 sync_photos 回應
             if response.status_code != 200:
                 logging.error(f"❌ sync_photos 回傳非 200：{response.status_code}, {response.text}")
                 line_bot_api.push_message(user_id, TextSendMessage(text=f"❌ 同步失敗，請稍後再試。錯誤碼: {response.status_code}"))
